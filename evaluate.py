@@ -22,9 +22,13 @@ from pathlib import Path
 from config import PathConfig
 from utils.model_utils import L2Normalization
 import tensorflow.keras.backend as K
-
+from collections import defaultdict
+from sklearn.metrics import precision_score, recall_score
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
+
+# Define distortion suffixes
+DISTORTION_SUFFIXES = ['blurred', 'foggy', 'lowlight', 'noisy', 'rainy', 'resized', 'sunny']
 
 def contrastive_loss(margin=1.0):
     """Contrastive loss function for siamese networks"""
@@ -40,127 +44,11 @@ def contrastive_accuracy(margin=1.0):
         return K.mean(K.equal(y_true, K.cast(y_pred < 0.5, y_true.dtype)))
     return accuracy
 
-class FaceRecognitionEvaluator:
-    """Class to handle face recognition evaluation with KNN"""
-    def __init__(self, embedding_network):
-        self.embedding_network = embedding_network
-        self.knn = None
-        self.label_encoder = LabelEncoder()
-        
-    def process_images(self, directory):
-        """Process all images in the directory and extract embeddings"""
-        embeddings, labels, images, filenames = [], [], [], []
-        
-        for person_id in tqdm(sorted(os.listdir(directory)), desc="Processing identities"):
-            person_path = os.path.join(directory, person_id)
-            if not os.path.isdir(person_path):
-                continue
-                
-            # Process main image (clean image)
-            main_img_path = os.path.join(person_path, f"{person_id}.jpg")
-            if os.path.exists(main_img_path):
-                img, embedding, filename = self._process_single_image(main_img_path)
-                if embedding is not None:
-                    images.append(img)
-                    embeddings.append(embedding)
-                    labels.append(person_id)
-                    filenames.append(filename)
-            
-            # Process distortion images
-            distortion_path = os.path.join(person_path, "distortion")
-            if os.path.isdir(distortion_path):
-                for img_name in sorted([f for f in os.listdir(distortion_path) 
-                                      if f.lower().endswith(('.jpg', '.jpeg')) and f.startswith(person_id)]):
-                    img_path = os.path.join(distortion_path, img_name)
-                    img, embedding, filename = self._process_single_image(img_path)
-                    if embedding is not None:
-                        images.append(img)
-                        embeddings.append(embedding)
-                        labels.append(person_id)
-                        filenames.append(filename)
-        
-        if not embeddings:
-            raise ValueError("No valid images found for evaluation")
-            
-        return np.array(images), np.vstack(embeddings), np.array(labels), filenames
-    
-    def _process_single_image(self, img_path):
-        """Helper to process a single image file"""
-        try:
-            img = tf.io.read_file(img_path)
-            img = tf.image.decode_jpeg(img, channels=3)
-            img_np = tf.image.resize(img, (224, 224)).numpy()
-            
-            if img_np.max() <= 1.0:
-                img_np = (img_np * 255).astype('uint8')
-            
-            img_preprocessed = tf.keras.applications.mobilenet_v2.preprocess_input(img_np)
-            embedding = self.embedding_network.predict(
-                tf.expand_dims(img_preprocessed, axis=0), verbose=0)
-            return img_np, embedding, img_path
-        except Exception as e:
-            print(f"Error processing {img_path}: {str(e)}")
-            return None, None, None
-    
-    def evaluate(self, images, embeddings, labels, filenames):
-        """Run full evaluation pipeline"""
-        # Encode labels numerically
-        y_encoded = self.label_encoder.fit_transform(labels)
-        
-        # Split data (stratified by identity)
-        (X_train, X_test, 
-         y_train, y_test, 
-         img_train, img_test, 
-         filename_train, filename_test) = train_test_split(
-            embeddings, y_encoded, images, filenames,
-            test_size=0.3, random_state=42, stratify=y_encoded)
-        
-        # Train KNN classifier
-        self.knn = KNeighborsClassifier(
-            n_neighbors=5,
-            metric='cosine',
-            weights='distance'
-        )
-        self.knn.fit(X_train, y_train)
-        
-        # Get predictions and probabilities
-        y_pred = self.knn.predict(X_test)
-        y_proba = self.knn.predict_proba(X_test) if hasattr(self.knn, 'predict_proba') else None
-        
-        # Calculate metrics
-        metrics = {
-            'accuracy': accuracy_score(y_test, y_pred),
-            'f1_score': f1_score(y_test, y_pred, average='weighted'),
-            'roc_auc': roc_auc_score(y_test, y_proba, multi_class='ovr') if y_proba is not None else None,
-            'num_classes': len(self.label_encoder.classes_)
-        }
-        
-        # Add top-k accuracy if applicable
-        if y_proba is not None:
-            top_k = min(3, len(self.label_encoder.classes_))
-            metrics[f'top_{top_k}_accuracy'] = top_k_accuracy_score(y_test, y_proba, k=top_k)
-        
-        # Decode labels back to original names
-        y_test_names = self.label_encoder.inverse_transform(y_test)
-        y_pred_names = self.label_encoder.inverse_transform(y_pred)
-        
-        return {
-            'images': img_test,
-            'filenames': filename_test,
-            'true_labels': y_test_names,
-            'pred_labels': y_pred_names,
-            'embeddings': X_test,
-            'metrics': metrics,
-            'knn': self.knn
-        }
-
 def visualize_embeddings(embeddings, labels, output_path):
     """Create t-SNE visualization of embeddings"""
-    # Reduce dimensionality
     tsne = TSNE(n_components=2, random_state=42, perplexity=30)
     embeddings_2d = tsne.fit_transform(embeddings)
     
-    # Plot
     plt.figure(figsize=(16, 12))
     unique_labels = np.unique(labels)
     colors = plt.cm.get_cmap('tab20', len(unique_labels))
@@ -180,14 +68,12 @@ def save_visual_report(y_true, y_pred, class_names, output_path, title):
     """Enhanced visual report with better formatting"""
     plt.figure(figsize=(18, 6))
     
-    # Classification report
     plt.subplot(1, 3, 1)
     report = classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
     report_df = pd.DataFrame(report).iloc[:-1, :].T
     sns.heatmap(report_df, annot=True, cmap='Blues', fmt='.2f', cbar=False)
     plt.title(f"{title}\nClassification Report", pad=20)
     
-    # Confusion matrix
     plt.subplot(1, 3, 2)
     cm = confusion_matrix(y_true, y_pred)
     sns.heatmap(cm, annot=True, fmt='d', cmap='Greens', 
@@ -197,7 +83,6 @@ def save_visual_report(y_true, y_pred, class_names, output_path, title):
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
     
-    # Class distribution
     plt.subplot(1, 3, 3)
     class_dist = pd.Series(y_true).value_counts().sort_index()
     class_dist.plot(kind='bar', color='skyblue')
@@ -225,7 +110,6 @@ def save_individual_results(images, filenames, true_labels, pred_labels, knn, em
         img_uint8 = (img * 255).astype('uint8') if img.dtype != np.uint8 else img
         plt.imshow(img_uint8)
         
-        # Get confidence if available
         confidence = ""
         if knn and hasattr(knn, 'predict_proba'):
             try:
@@ -293,7 +177,6 @@ def evaluate_gender_classifier(model_path, val_gen, results_dir):
     
     model = tf.keras.models.load_model(model_path)
     
-    # Collect all predictions
     val_gen.reset()
     images, labels, preds = [], [], []
     for _ in range(len(val_gen)):
@@ -302,37 +185,180 @@ def evaluate_gender_classifier(model_path, val_gen, results_dir):
         labels.extend(batch[1])
         preds.extend(model.predict(batch[0], verbose=0))
     
-    # Convert and save results
-    y_true = np.array(labels).squeeze()  # Fix shape issues
+    y_true = np.array(labels).squeeze()
     y_pred = (np.array(preds).squeeze() > 0.5).astype(int)
     roc_auc = roc_auc_score(y_true, np.array(preds).squeeze())
+    precision = precision_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
+
     
-    # Save reports
     save_visual_report(
         y_true, y_pred, ['female', 'male'],
         os.path.join(results_dir, "report.jpg"),
         "Gender Classification"
     )
     
-    # Save individual results
     results = save_individual_gender_results(
         images, labels, preds,
         os.path.join(results_dir, "individual"))
     
-    # Save metrics
     accuracy = np.mean([r['correct'] for r in results])
     metrics = {
-        'accuracy': accuracy,
-        'roc_auc': roc_auc,
-        'num_samples': len(results)
+    'accuracy': accuracy,
+    'precision': precision,
+    'recall': recall,
+    'f1_score': f1,
+    'roc_auc': roc_auc,
+    'num_samples': len(results)
     }
     pd.DataFrame([metrics]).to_csv(
         os.path.join(results_dir, "metrics.csv"), index=False)
     
     print(f"\nGender Classification Results:")
     print(f"Accuracy: {accuracy:.2%}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"F1-Score: {f1:.4f}")
     print(f"ROC AUC: {roc_auc:.4f}")
-    print(f"Evaluated {len(results)} images")
+
+class FaceRecognitionEvaluator:
+    """Class to handle face recognition evaluation with KNN"""
+    def __init__(self, embedding_network):
+        self.embedding_network = embedding_network
+        self.knn = None
+        self.label_encoder = LabelEncoder()
+        
+    def process_images(self, directory):
+        """Process all images in the directory and extract embeddings"""
+        embeddings, labels, images, filenames = [], [], [], []
+        
+        for person_id in tqdm(sorted(os.listdir(directory)), desc="Processing identities"):
+            person_path = os.path.join(directory, person_id)
+            if not os.path.isdir(person_path):
+                continue
+                
+            # Process clean images
+            for file in sorted(os.listdir(person_path)):
+                if not file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    continue
+                if file.startswith('.'):
+                    continue
+                if file.lower() == 'distortion':
+                    continue
+                    
+                clean_img_path = os.path.join(person_path, file)
+                img, embedding, filename = self._process_single_image(clean_img_path)
+                if embedding is not None:
+                    images.append(img)
+                    embeddings.append(embedding)
+                    labels.append(person_id)
+                    filenames.append(filename)
+            
+            # Process distorted images
+            distortions_dir = os.path.join(person_path, 'distortion')
+            if os.path.exists(distortions_dir):
+                for dist_file in sorted(os.listdir(distortions_dir)):
+                    if not dist_file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                        continue
+                    dist_path = os.path.join(distortions_dir, dist_file)
+                    img, embedding, filename = self._process_single_image(dist_path)
+                    if embedding is not None:
+                        images.append(img)
+                        embeddings.append(embedding)
+                        labels.append(person_id)
+                        filenames.append(filename)
+        
+        if not embeddings:
+            raise ValueError("No valid images found for evaluation")
+            
+        return np.array(images), np.vstack(embeddings), np.array(labels), filenames
+    
+    def _process_single_image(self, img_path):
+        """Helper to process a single image file"""
+        try:
+            img = tf.io.read_file(img_path)
+            img = tf.image.decode_jpeg(img, channels=3)
+            img_np = tf.image.resize(img, (224, 224)).numpy()
+            
+            if img_np.max() <= 1.0:
+                img_np = (img_np * 255).astype('uint8')
+            
+            img_preprocessed = tf.keras.applications.mobilenet_v2.preprocess_input(img_np)
+            embedding = self.embedding_network.predict(
+                tf.expand_dims(img_preprocessed, axis=0), verbose=0)
+            return img_np, embedding, img_path
+        except Exception as e:
+            print(f"Error processing {img_path}: {str(e)}")
+            return None, None, None
+    
+    def evaluate(self, images, embeddings, labels, filenames):
+        """Run full evaluation pipeline"""
+        y_encoded = self.label_encoder.fit_transform(labels)
+        
+        # Separate clean and distorted images
+        clean_indices = [i for i, fname in enumerate(filenames) 
+                        if 'distortion' not in fname.lower()]
+        distorted_indices = [i for i in range(len(filenames)) 
+                           if i not in clean_indices]
+        
+        if not clean_indices:
+            raise ValueError("No clean images found for training")
+        if not distorted_indices:
+            raise ValueError("No distorted images found for testing")
+        
+        print(f"Using {len(clean_indices)} clean images for training")
+        print(f"Using {len(distorted_indices)} distorted images for testing")
+        
+        # Train on clean images only
+        X_train = embeddings[clean_indices]
+        y_train = y_encoded[clean_indices]
+        
+        # Test on distorted images only
+        X_test = embeddings[distorted_indices]
+        y_test = y_encoded[distorted_indices]
+        img_test = images[distorted_indices]
+        filename_test = [filenames[i] for i in distorted_indices]
+        
+        self.knn = KNeighborsClassifier(
+            n_neighbors=5,
+            metric='cosine',
+            weights='distance'
+        )
+        self.knn.fit(X_train, y_train)
+        
+        y_pred = self.knn.predict(X_test)
+        y_proba = self.knn.predict_proba(X_test) if hasattr(self.knn, 'predict_proba') else None
+        
+        metrics = {
+        'top1_accuracy': accuracy_score(y_test, y_pred),
+        'f1_score_macro': f1_score(y_test, y_pred, average='macro'),
+        'num_classes': len(self.label_encoder.classes_)
+    }
+        
+        if y_proba is not None:
+            present_classes = np.unique(y_test)
+            valid_indices = [i for i, cls in enumerate(self.knn.classes_) 
+                           if cls in present_classes]
+            if len(valid_indices) > 0:
+                y_proba_filtered = y_proba[:, valid_indices]
+                metrics['roc_auc'] = roc_auc_score(y_test, y_proba_filtered, multi_class='ovr')
+            
+            top_k = min(3, len(self.label_encoder.classes_))
+            metrics[f'top_{top_k}_accuracy'] = top_k_accuracy_score(y_test, y_proba, k=top_k)
+        
+        y_test_names = self.label_encoder.inverse_transform(y_test)
+        y_pred_names = self.label_encoder.inverse_transform(y_pred)
+        
+        return {
+            'images': img_test,
+            'filenames': filename_test,
+            'true_labels': y_test_names,
+            'pred_labels': y_pred_names,
+            'embeddings': X_test,
+            'metrics': metrics,
+            'knn': self.knn
+        }
 
 def evaluate_face_recognition(model_path, data_dir, results_dir):
     """Main face recognition evaluation function"""
@@ -341,29 +367,26 @@ def evaluate_face_recognition(model_path, data_dir, results_dir):
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Face recognition model not found at {model_path}")
     
-    # Load the complete siamese model first to get the embedding network
     try:
         siamese_model = tf.keras.models.load_model(
             model_path,
             custom_objects={
                 'L2Normalization': L2Normalization,
-                'contrastive_loss': contrastive_loss(),  # Changed from 'loss' to 'contrastive_loss'
-                'contrastive_accuracy': contrastive_accuracy()  # Changed from 'accuracy' to 'contrastive_accuracy'
+                'contrastive_loss': contrastive_loss(),
+                'contrastive_accuracy': contrastive_accuracy()
             },
-            compile=False  # Added to prevent compilation issues
+            compile=False
         )
     except Exception as e:
         print(f"Error loading model: {str(e)}")
         raise
     
-    # Extract the embedding network from the siamese model
     try:
-        embedding_network = siamese_model.layers[2]  # Gets the EfficientNet-based embedding model
+        embedding_network = siamese_model.layers[2]
     except Exception as e:
         print(f"Error extracting embedding network: {str(e)}")
         raise
     
-    # Initialize evaluator
     evaluator = FaceRecognitionEvaluator(embedding_network)
     
     print("\nProcessing validation images...")
@@ -374,7 +397,6 @@ def evaluate_face_recognition(model_path, data_dir, results_dir):
         print(f"Error during evaluation: {str(e)}")
         raise
     
-    # Save reports
     save_visual_report(
         results['true_labels'], results['pred_labels'],
         evaluator.label_encoder.classes_,
@@ -382,20 +404,17 @@ def evaluate_face_recognition(model_path, data_dir, results_dir):
         "Face Recognition"
     )
     
-    # Save individual results
     individual_results = save_individual_results(
         results['images'], results['filenames'],
         results['true_labels'], results['pred_labels'],
         results['knn'], results['embeddings'],
         os.path.join(results_dir, "individual"))
     
-    # Save metrics and embeddings
     pd.DataFrame(results['metrics'], index=[0]).to_csv(
         os.path.join(results_dir, "metrics.csv"), index=False)
     pd.DataFrame(individual_results).to_csv(
         os.path.join(results_dir, "predictions.csv"), index=False)
     
-    # Visualize embeddings
     visualize_embeddings(embeddings, labels,
                         os.path.join(results_dir, "embeddings.jpg"))
     
@@ -407,7 +426,6 @@ if __name__ == "__main__":
     print("Starting evaluation pipeline...")
     
     try:
-        # Load gender classification validation data
         from utils.data_utils import load_gender_classification_data
         _, val_gen = load_gender_classification_data()
         

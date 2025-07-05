@@ -1,0 +1,6 @@
+Gender Classification Results:
+Accuracy: 90.52%
+Precision: 91.02%
+Recall: 90.01%
+F1-Score: 90.51%
+ROC AUC: 0.9517

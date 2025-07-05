@@ -19,18 +19,18 @@ class ModelConfig:
     CHANNELS = 3
 
     # Training parameters
-    BATCH_SIZE = 64
+    BATCH_SIZE = 32  # Changed from 64 to prevent OOM errors
     EMBEDDING_SIZE = 256
     INITIAL_LR = 0.0001
     WEIGHT_DECAY = 0.0001
     EPOCHS = 50
 
     # Augmentation
-    ROTATION_RANGE = 15
-    BRIGHTNESS_RANGE = 0.1
+    ROTATION_RANGE = 20  # Increased from 15 for stronger augmentation
+    BRIGHTNESS_RANGE = 0.2  # Increased from 0.1 for more variability
 
     # Early stopping
-    PATIENCE = 10
+    PATIENCE = 8  # Reduced from 10 for earlier stopping
     MIN_DELTA = 0.001
 
 # ================= COMPLETE PATH CONFIG =================
@@ -51,7 +51,7 @@ class PathConfig:
     GENDER_MODEL = MODELS_DIR / "gender_classifier.h5"
     SIAMESE_MODEL = MODELS_DIR / "siamese_model.keras"
     EMBEDDING_MODEL = MODELS_DIR / "embedding_model.keras"
-    FACE_MODEL = MODELS_DIR / "resnet_face_model.keras"  # <-- Updated correctly
+    FACE_MODEL = MODELS_DIR / "face_recognizer.keras"
 
     # Results subdirectories
     TRAINING_LOGS = RESULTS_DIR / "training_logs"

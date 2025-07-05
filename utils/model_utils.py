@@ -47,24 +47,28 @@ def build_embedding_network():
     """Build the shared embedding network for Task B"""
     print("\nBuilding embedding network...")
 
-    base_model = applications.MobileNetV2(
+    base_model = applications.ResNet50(
         input_shape=ModelConfig.IMAGE_SIZE + (ModelConfig.CHANNELS,),
         include_top=False,
-        weights='imagenet'
+        weights='imagenet',
+        pooling='avg'
     )
 
     for layer in base_model.layers[:100]:
         layer.trainable = False
 
-    model = models.Sequential([
-        layers.Input(shape=ModelConfig.IMAGE_SIZE + (ModelConfig.CHANNELS,)),
-        base_model,
-        layers.GlobalAveragePooling2D(),
-        layers.Dense(ModelConfig.EMBEDDING_SIZE, activation=None),
-        L2Normalization()
-    ])
+    inputs = layers.Input(shape=ModelConfig.IMAGE_SIZE + (ModelConfig.CHANNELS,))
+    x = layers.RandomRotation(0.2)(inputs)
+    x = layers.RandomContrast(0.2)(x)
+    x = base_model(x)
+    x = layers.Dense(512, activation=None)(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.LeakyReLU()(x)
+    x = layers.Dropout(0.5)(x)
+    x = layers.Dense(256, activation=None)(x)
+    x = L2Normalization()(x)
 
-    return model
+    return models.Model(inputs, x)
 
 
 def build_siamese_network(embedding_network):
@@ -78,17 +82,17 @@ def build_siamese_network(embedding_network):
     embedding2 = embedding_network(input2)
 
     distance = layers.Lambda(
-        lambda embeddings: tf.reduce_sum(tf.square(embeddings[0] - embeddings[1]), axis=1, keepdims=True)
+        lambda embeddings: tf.norm(embeddings[0] - embeddings[1], axis=1, keepdims=True)
     )([embedding1, embedding2])
 
-    output = layers.Dense(1, activation='sigmoid')(distance)
+    output = layers.Activation('linear', dtype='float32')(distance)
 
     siamese_model = models.Model(inputs=[input1, input2], outputs=output)
 
     siamese_model.compile(
         optimizer=tf.keras.optimizers.Adam(ModelConfig.INITIAL_LR),
-        loss='binary_crossentropy',
-        metrics=['accuracy']
+        loss='mean_squared_error',
+        metrics=[]
     )
 
     return siamese_model

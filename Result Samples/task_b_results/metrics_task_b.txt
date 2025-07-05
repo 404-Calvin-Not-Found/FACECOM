@@ -1,0 +1,5 @@
+Face Recognition Results:
+Top-1 Accuracy: 25.02%
+Macro-Averaged F1: 25.00%
+Top-3 Accuracy: 49.49%
+ROC AUC: 0.7963
